@@ -4,7 +4,18 @@ import base64
 import requests
 import shutil
 
-def fetch_activity_jsons(account_id, api_access_key, api_secret_key, activity_ids, output_dir):
+def extract_field(data, fieldstr):
+    """Extracts value by dot-separated path from nested dict."""
+    parts = fieldstr.split('.')
+    val = data
+    for p in parts:
+        if isinstance(val, dict) and p in val:
+            val = val[p]
+        else:
+            return ""
+    return val
+
+def fetch_activity_jsons(account_id, api_access_key, api_secret_key, activity_ids, output_dir, transcription_field):
     os.makedirs(output_dir, exist_ok=True)
     transcriptions = []
     total = len(activity_ids)
@@ -21,7 +32,7 @@ def fetch_activity_jsons(account_id, api_access_key, api_secret_key, activity_id
             jf.write(resp.text)
         try:
             data = resp.json()
-            transcription = data.get("transcription_text", "") or data.get("transcription", "")
+            transcription = extract_field(data, transcription_field)
             audio = data.get("audio", None)
         except Exception as e:
             print(f"Failed to parse json for {call_id}: {e}")
@@ -51,14 +62,14 @@ def fetch_last_call_ids(account_id, api_access_key, api_secret_key, per_page=100
     print(f"Fetched {len(activity_ids)} most recent Activity IDs")
     return activity_ids
 
-def load_transcriptions_from_json(output_dir):
+def load_transcriptions_from_json(output_dir, transcription_field):
     transcriptions = []
     for fname in os.listdir(output_dir):
         if fname.endswith('.json'):
             try:
                 with open(os.path.join(output_dir, fname)) as f:
                     data = json.load(f)
-                    transcription = data.get("transcription_text", "") or data.get("transcription", "")
+                    transcription = extract_field(data, transcription_field)
                     audio = data.get("audio", None)
                 transcriptions.append({
                     "call_id": data.get("id", fname),
@@ -69,13 +80,13 @@ def load_transcriptions_from_json(output_dir):
                 print(f"Skipping {fname}: {e}")
     return transcriptions
 
-def make_html(transcriptions):
+def make_html(transcriptions, transcription_field):
     safe_text = lambda text: str(text if text is not None else '').replace("<", "&lt;").replace(">", "&gt;")
     html = f"""<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8"/>
-  <title>CTM Call Transcriptions (Static Copy Selector)</title>
+  <title>CTM Call Field Viewer</title>
   <style>
     body{{background:#182132;color:#fff;font-family:sans-serif;margin:0;}}
     .wrap{{max-width:1000px;margin:20px auto;padding:24px;}}
@@ -94,7 +105,7 @@ def make_html(transcriptions):
 </head>
 <body>
   <div class="wrap">
-    <h1>CTM Transcribed Calls</h1>
+    <h1>CTM: {safe_text(transcription_field)} field from recent calls</h1>
     <div class="card">
       <div style="margin-bottom:8px;">
         <button class="copy-btn" onclick="fillCopy(5)">Copy 5</button>
@@ -109,15 +120,15 @@ def make_html(transcriptions):
 """
     joined_transcripts = []
     for t in transcriptions:
-        if (t['transcription'] or '').strip():
+        if (str(t['transcription'] or '').strip()):
             joined_transcripts.append(
-                f"Call ID: {safe_text(t['call_id'])}\\nTranscription:\\n{safe_text(t['transcription'])}\\n" + '-'*32
+                f"Call ID: {safe_text(t['call_id'])}\\n{safe_text(transcription_field)}:\\n{safe_text(t['transcription'])}\\n" + '-'*32
             )
     html += json.dumps(joined_transcripts, ensure_ascii=False, indent=2)
     html += """;
 function showCopyMsg(n) {
   let msgBox = document.getElementById('copy-status');
-  msgBox.innerText = 'Copied ' + n + ' transcription' + (n === 1 ? '' : 's') + '!';
+  msgBox.innerText = 'Copied ' + n + ' result' + (n === 1 ? '' : 's') + '!';
   msgBox.style.opacity = 1;
   setTimeout(function() { msgBox.style.opacity = 0; }, 1500);
 }
@@ -135,12 +146,12 @@ function fillCopy(n) {
 fillCopy(10);
 </script>
 """
-    html += """
+    html += f"""
     <div class="card"><table class="trans-table">
-<tr><th>Call ID</th><th>Transcription</th><th>Audio</th></tr>
+<tr><th>Call ID</th><th>{safe_text(transcription_field)}</th><th>Audio</th></tr>
 """
     for t in transcriptions:
-        if (t['transcription'] or '').strip():
+        if (str(t['transcription'] or '').strip()):
             audio_html = f"<a href='{safe_text(t['audio'])}' target='_blank'>Listen</a>" if t['audio'] else "Not available"
             html += f"<tr><td>{safe_text(t['call_id'])}</td><td class='transcription'>{safe_text(t['transcription'])}</td><td>{audio_html}</td></tr>\n"
     html += '</table></div>\n'
@@ -154,38 +165,49 @@ if __name__ == "__main__":
     api_access_key = input("Enter API Access Key: ").strip()
     api_secret_key = input("Enter API Secret Key: ").strip()
 
+    print("Example field values you can enter: transcription_text  |  custom_fields.example")
+    transcription_field = input(
+        "Enter the JSON field to extract from each call (press Enter to use default: transcription_text): "
+    ).strip()
+    if not transcription_field:
+        transcription_field = "transcription_text"
+
     raw_ids = input("Enter comma-separated Call IDs (leave blank for last 100 calls): ").strip()
     output_dir = "output_json"
 
-    # Ensure output_json is fresh on each run
+    # Clean up previous outputs: remove ctm_transcriptions_* files in the current dir
+    for fname in os.listdir('.'):
+        if fname.startswith('ctm_transcriptions_'):
+            try:
+                os.remove(fname)
+            except Exception as e:
+                print(f"Warning: Could not delete {fname}: {e}")
+
+    # Remove and recreate output_json dir for fresh results
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Ensure old HTML is blanked out at start of run
-    with open("ctm_transcriptions_output.html", "w") as outf:
-        outf.write("")
-
     if raw_ids:
         activity_ids = [aid.strip() for aid in raw_ids.split(',') if aid.strip()]
-        transcriptions = fetch_activity_jsons(account_id, api_access_key, api_secret_key, activity_ids, output_dir)
+        transcriptions = fetch_activity_jsons(account_id, api_access_key, api_secret_key, activity_ids, output_dir, transcription_field)
     else:
         activity_ids = fetch_last_call_ids(account_id, api_access_key, api_secret_key, per_page=100)
-        transcriptions = fetch_activity_jsons(account_id, api_access_key, api_secret_key, activity_ids, output_dir)
+        transcriptions = fetch_activity_jsons(account_id, api_access_key, api_secret_key, activity_ids, output_dir, transcription_field)
 
     # After API fetch, strictly use local JSONs for reliable HTML content
-    transcriptions = [t for t in load_transcriptions_from_json(output_dir) if t["transcription"]]
+    transcriptions = [t for t in load_transcriptions_from_json(output_dir, transcription_field) if str(t["transcription"]).strip()]
 
     if not transcriptions:
-        print("No transcriptions found - nothing to output.")
+        print("No results found for field '{0}' - nothing to output.".format(transcription_field))
         exit(1)
 
-    html = make_html(transcriptions)
+    html = make_html(transcriptions, transcription_field)
     out_html = "ctm_transcriptions_output.html"
     with open(out_html, "w") as outf:
         outf.write(html)
 
-    print(f"\n✅ Done! Output refreshed: '{output_dir}' and '{out_html}' for account {account_id}.")
+    print(f"\n✅ Done! Output refreshed: '{output_dir}' and '{out_html}' for account {account_id} and field '{transcription_field}'.")
 
     import subprocess
     subprocess.run(['open', out_html])
