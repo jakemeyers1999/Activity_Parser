@@ -62,7 +62,3 @@ Extracted transcriptions are organized into local JSON files and featured in a d
 MIT License
 
 ---
-
-## Issues
-
-If you discover bugs or want further enhancements (filters, CSV export, more UI tools), please open an issue or pull request!
